@@ -130,7 +130,8 @@ open "build/DNS Pulse.app"
 ```
 
 - `ARCHS=arm64 ./build_app.sh` builds for Apple silicon only, which is faster.
-- `./scripts/make_dmg.sh` packs the app into `build/DNS-Pulse-<version>.dmg`.
+- `./scripts/make_dmg.sh` packs the app into `build/DNS-Pulse-<version>.dmg`, with an installer window that shows
+  where to drag the app. It uses [dmgbuild](https://github.com/dmgbuild/dmgbuild), installed on first run into `build/.venv`.
 - Open `Package.swift` in Xcode to work on the code.
 
 ### Command line
