@@ -33,6 +33,8 @@ struct BenchmarkSample: Sendable {
     let result: ProbeResult
     /// Says nothing about the server, so it counts neither way (see `BenchmarkCore.isLeftOut`).
     var isLeftOut = false
+    /// The addresses the answer gave, when the test keeps them for the destination check.
+    var addresses: [String] = []
 }
 
 /// The parts of a benchmark that don't touch UI state, shared by the app and the command-line mode.
@@ -54,14 +56,26 @@ enum BenchmarkCore {
     }
 
     /// Looks up one website on every server at the same moment, so every server sees the same network conditions.
-    static func perform(_ job: BenchmarkJob, targets: [ProbeTarget], config: BenchmarkConfig) async -> [BenchmarkSample] {
-        let samples = await withTaskGroup(of: BenchmarkSample.self) { group in
+    /// Answers to real website names carry the addresses the destination check connects to. Uncached mode's made-up
+    /// names don't point anywhere real.
+    static func keepsAddresses(_ config: BenchmarkConfig) -> Bool {
+        config.mode != .uncached && config.recordType.carriesAddresses
+    }
+
+    /// Waits for the job's turn when the test spaces websites out (see `LookupPacer`), then looks it up.
+    static func perform(_ job: BenchmarkJob, targets: [ProbeTarget], config: BenchmarkConfig, pacer: LookupPacer?) async -> [BenchmarkSample] {
+        await pacer?.waitTurn()
+        guard !Task.isCancelled else { return [] }
+        return await withTaskGroup(of: BenchmarkSample.self) { group in
             for target in targets {
                 group.addTask {
                     let name = queryName(for: job.domain, mode: config.mode)
-                    let result = await DNSProber.probe(target, name: name, type: config.recordType, timeout: config.timeout)
+                    let (result, addresses) = keepsAddresses(config)
+                        ? await DNSProber.probeKeepingAddresses(target, name: name, type: config.recordType, timeout: config.timeout)
+                        : (await DNSProber.probe(target, name: name, type: config.recordType, timeout: config.timeout), [])
                     let leftOut = await isLeftOut(result, for: job.domain, on: target, config: config)
-                    return BenchmarkSample(serverID: target.serverID, round: job.round, domain: job.domain, result: result, isLeftOut: leftOut)
+                    return BenchmarkSample(serverID: target.serverID, round: job.round, domain: job.domain, result: result,
+                                           isLeftOut: leftOut, addresses: addresses)
                 }
             }
             var collected: [BenchmarkSample] = []
@@ -69,10 +83,6 @@ enum BenchmarkCore {
             for await sample in group { collected.append(sample) }
             return collected
         }
-        if config.delayMs > 0 {
-            try? await Task.sleep(nanoseconds: UInt64(config.delayMs) * 1_000_000)
-        }
-        return samples
     }
 
     /// Uncached mode's made-up names aren't real websites, and some servers refuse them under a few websites (Cloudflare
@@ -88,12 +98,16 @@ enum BenchmarkCore {
     /// server will need is already open. In cached mode every website is primed on every server.
     static func warmUp(targets: [ProbeTarget], domains: [String], config: BenchmarkConfig) async {
         let names = config.mode == .cached ? domains : Array(repeating: warmUpName, count: config.parallelism)
+        // Priming websites in cached mode is spaced out like the test, so a dropped burst doesn't leave some unprimed.
+        // The other warm-up has to go at once: it opens as many connections to each encrypted server as the test uses.
+        let pacer = config.mode == .cached ? LookupPacer(delayMs: config.delayMs) : nil
         var index = 0
         while index < names.count, !Task.isCancelled {
             let chunk = names[index..<min(index + config.parallelism, names.count)]
             index += chunk.count
             await withTaskGroup(of: Void.self) { group in
                 for name in chunk {
+                    await pacer?.waitTurn()
                     for target in targets {
                         group.addTask {
                             _ = await DNSProber.probe(target, name: name, type: config.recordType, timeout: config.timeout)
@@ -102,6 +116,28 @@ enum BenchmarkCore {
                 }
             }
         }
+    }
+}
+
+/// Starts each website's lookups at least the test's pause apart, counted across every website in flight. Each website
+/// goes to every server at once, so several websites starting together send a burst that some routers and ISPs drop
+/// part of; on such networks the lost lookups show up as timeouts that a retest then answers.
+actor LookupPacer {
+    private let interval: UInt64
+    private var nextStart: UInt64 = 0
+
+    /// Nil when there's no pause, so nothing waits.
+    init?(delayMs: Int) {
+        guard delayMs > 0 else { return nil }
+        interval = UInt64(delayMs) * 1_000_000
+    }
+
+    /// Returns at this caller's turn. The turn is taken before waiting, so callers keep their order and spacing.
+    func waitTurn() async {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let start = max(now, nextStart)
+        nextStart = start + interval
+        if start > now { try? await Task.sleep(nanoseconds: start - now) }
     }
 }
 
@@ -172,6 +208,7 @@ final class BenchmarkEngine: ObservableObject {
         }
 
         isRetest = false
+        DestinationChecker.shared.stopAll()
         prepareToRun()
         activeOptions = pendingOptions
         activeOptions.network = networkProvider?()
@@ -200,6 +237,7 @@ final class BenchmarkEngine: ObservableObject {
         let playSound = settings.playSound
 
         isRetest = true
+        DestinationChecker.shared.stopAll()
         prepareToRun()
         activeOptions = RunOptions()
         runTask = Task { [weak self, weak store] in
@@ -328,11 +366,12 @@ final class BenchmarkEngine: ObservableObject {
         phase = .running
         progress.runningSince = Date()
         startTicker()
+        let pacer = LookupPacer(delayMs: config.delayMs)
         await withTaskGroup(of: [BenchmarkSample].self) { group in
             var pending = jobs.makeIterator()
             for _ in 0..<config.parallelism {
                 guard let next = pending.next() else { break }
-                group.addTask { await BenchmarkCore.perform(next.job, targets: next.targets, config: config) }
+                group.addTask { await BenchmarkCore.perform(next.job, targets: next.targets, config: config, pacer: pacer) }
             }
             for await samples in group {
                 record(samples)
@@ -341,7 +380,7 @@ final class BenchmarkEngine: ObservableObject {
                     continue
                 }
                 if let next = pending.next() {
-                    group.addTask { await BenchmarkCore.perform(next.job, targets: next.targets, config: config) }
+                    group.addTask { await BenchmarkCore.perform(next.job, targets: next.targets, config: config, pacer: pacer) }
                 }
             }
         }
@@ -422,7 +461,9 @@ extension BenchmarkEngine {
     func start(store: AppStore, onlyServers: Set<UUID>? = nil) {
         let servers = onlyServers.map { ids in store.servers.filter { ids.contains($0.id) } } ?? store.enabledServers
         start(servers: servers, domains: store.testDomains, settings: store.settings) { [weak store] run in
-            store?.addRun(run)
+            guard let store else { return }
+            store.addRun(run)
+            DestinationChecker.shared.checkAfterTest(run, store: store, isQuiet: false)
         }
     }
 }

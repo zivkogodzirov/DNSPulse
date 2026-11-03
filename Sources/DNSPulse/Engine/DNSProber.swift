@@ -123,8 +123,46 @@ enum DNSProber {
         }
     }
 
-    /// Like `probe`, but keeps the reply and decodes its answers. Used by diagnostics only;
-    /// the benchmark sticks to `probe`, which never copies or parses a response.
+    /// Like `probe`, but also returns the addresses in the answer (A and AAAA records), for the destination check.
+    /// The reply is copied only after the clock has stopped, so the time is the same as `probe`'s.
+    static func probeKeepingAddresses(_ target: ProbeTarget, name: String, type: DNSRecordType, timeout: TimeInterval,
+                                      dot: DoTClient = .shared, doh: DoHClient = .shared) async -> (result: ProbeResult, addresses: [String]) {
+        let result: ProbeResult
+        let answers: [DNSRecord]
+        switch target.endpoint {
+        case let .udp(address, family):
+            let id = UInt16.random(in: 1...UInt16.max)
+            guard let packet = DNSPacket.makeQuery(id: id, name: name, type: type) else {
+                return (.failure(.networkError, "Invalid domain name"), [])
+            }
+            let (answered, response) = await UDPExchange.performKeepingResponse(address: address, family: family, packet: packet, expectedID: id, timeout: timeout)
+            result = answered
+            answers = response.flatMap { DNSPacket.parseResponse($0)?.answers } ?? []
+        case let .dot(host, port):
+            guard let packet = DNSPacket.makeQuery(id: 0, name: name, type: type) else {
+                return (.failure(.networkError, "Invalid domain name"), [])
+            }
+            let (answered, response) = await dot.performKeepingResponse(host: host, port: port, packet: packet, timeout: timeout)
+            result = answered
+            answers = response.flatMap { DNSPacket.parseResponse($0)?.answers } ?? []
+        case let .doh(url):
+            guard let packet = DNSPacket.makeQuery(id: 0, name: name, type: type) else {
+                return (.failure(.networkError, "Invalid domain name"), [])
+            }
+            let (answered, response) = await doh.performKeepingResponse(url: url, packet: packet, timeout: timeout)
+            result = answered
+            answers = response.flatMap { DNSPacket.parseResponse($0)?.answers } ?? []
+        }
+        let addresses = answers.compactMap { record -> String? in
+            guard record.type == DNSRecordType.a.code || record.type == DNSRecordType.aaaa.code,
+                  case .address(let text) = record.value else { return nil }
+            return text
+        }
+        return (result, addresses)
+    }
+
+    /// Like `probe`, but keeps the reply and decodes its answers. Used by diagnostics, which want every record;
+    /// the benchmark uses `probe`, or `probeKeepingAddresses` when it needs the addresses.
     static func lookup(_ target: ProbeTarget, name: String, type: DNSLookupType, qclass: DNSClass = .internet, timeout: TimeInterval,
                        dot: DoTClient = .diagnostics, doh: DoHClient = .diagnostics) async -> (result: ProbeResult, records: [DNSRecord]) {
         switch target.endpoint {

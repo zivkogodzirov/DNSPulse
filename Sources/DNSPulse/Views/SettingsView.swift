@@ -67,6 +67,11 @@ private struct GeneralSettings: View {
                 Text("The Dock icon also bounces if DNS Pulse is in the background.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle("Check where each DNS sends you", isOn: $store.settings.checkDestinations)
+                Text("After Real-world and Cached tests, connects to the server each DNS pointed to for every website, to see which DNS sends you to nearer servers. Adds about a minute. You can also run it from a test's results.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("Results") {
@@ -231,8 +236,12 @@ private struct TestingSettings: View {
                     LabeledContent("Websites looked up at once", value: "\(store.settings.parallelism)")
                 }
                 Stepper(value: $store.settings.delayMs, in: 0...2000, step: 25) {
-                    LabeledContent("Pause between lookups", value: store.settings.delayMs == 0 ? "None" : "\(store.settings.delayMs) ms")
+                    LabeledContent("Pause between websites", value: store.settings.delayMs == 0 ? "None" : "\(store.settings.delayMs) ms")
                 }
+                Text(pauseHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section {
@@ -243,6 +252,16 @@ private struct TestingSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The pause is shared by every website in flight, so it sets the pace of the whole test.
+    private var pauseHelp: String {
+        let pause = store.settings.delayMs
+        let base = "Each website is looked up on every server at once. The pause is the time before the next website starts, counted across all websites being looked up, so lookups don't leave in bursts. Some routers and ISPs drop part of a burst of plain DNS, which shows up as timeouts; 50–100 ms is usually enough to avoid that."
+        guard pause > 0 else { return base }
+        let jobs = store.settings.rounds * max(1, store.testDomains.count)
+        let minimum = Double(jobs) * Double(pause) / 1000
+        return base + " With \(pause) ms, a test of \(jobs) website lookups takes at least \(Format.duration(minimum))."
     }
 }
 

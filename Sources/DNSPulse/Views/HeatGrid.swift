@@ -178,6 +178,10 @@ struct GridModel {
     let colNoAnswer: [Int]
     let scale: HeatScale
     let version: Int
+    /// Lookup times, connection times to the servers the answers pointed to, or both together.
+    let source: GridSource
+    /// The connection times behind the values, when they use them.
+    let destinations: DestinationReport?
 
     var n: Int { servers.count }
     func value(_ row: Int, _ column: Int) -> Double { values[row * n + column] }
@@ -188,8 +192,9 @@ struct GridModel {
     }
 
     init(run: BenchmarkRun, servers: [ServerResult], colour: HeatColourMode, search: String,
-         categories: [String: WebsiteCategory], order: MatrixOrder, serverSort: ServerSort?) {
+         categories: [String: WebsiteCategory], order: MatrixOrder, serverSort: ServerSort?, source: GridSource = .lookup) {
         let n = servers.count
+        let destinations = source.usesConnections ? run.destinations : nil
         let domains = run.domains
         let rows = domains.count
         var values = [Double](repeating: .nan, count: rows * n)
@@ -204,12 +209,33 @@ struct GridModel {
             var sum = 0.0
             var count = 0
             for (c, server) in servers.enumerated() {
-                guard let stat = server.domainStats[domain], stat.attempts > 0 else { continue }
                 let index = r * n + c
-                partial[index] = stat.failures > 0
-                guard let average = stat.mean else {
-                    values[index] = .infinity
-                    continue
+                let average: Double
+                if let destinations {
+                    guard let time = destinations.time(server.id, domain) else { continue }
+                    guard time.isFinite else {
+                        values[index] = .infinity
+                        continue
+                    }
+                    if source == .combined {
+                        guard let stat = server.domainStats[domain], stat.attempts > 0 else { continue }
+                        partial[index] = stat.failures > 0
+                        guard let lookup = stat.mean else {
+                            values[index] = .infinity
+                            continue
+                        }
+                        average = lookup + DestinationReport.tripsPerNewWebsite * time
+                    } else {
+                        average = time
+                    }
+                } else {
+                    guard let stat = server.domainStats[domain], stat.attempts > 0 else { continue }
+                    partial[index] = stat.failures > 0
+                    guard let mean = stat.mean else {
+                        values[index] = .infinity
+                        continue
+                    }
+                    average = mean
                 }
                 values[index] = average
                 sum += average
@@ -283,7 +309,11 @@ struct GridModel {
         hasher.combine(run.totalLookups)
         hasher.combine(servers.map(\.id))
         hasher.combine(colour)
+        hasher.combine(source)
+        hasher.combine(run.destinationCheck?.date)
         version = hasher.finalize()
+        self.source = source
+        self.destinations = destinations
 
         self.servers = servers
         self.domains = domains
@@ -624,7 +654,36 @@ struct InspectorText: View {
         let value = model.value(r, c)
         let stat = server.domainStats[domain]
         var long = "", medium = "", short = ""
-        if value.isNaN {
+        if model.source == .combined, value.isFinite {
+            let connection = model.destinations?.time(server.id, domain) ?? .nan
+            let lookup = value - DestinationReport.tripsPerNewWebsite * connection
+            let rank = 1 + (0..<model.n).filter { model.value(r, $0).isFinite && model.value(r, $0) < value }.count
+            let best = model.rowBest[r]
+            let bestName = model.rowBestCol[r].map { model.servers[$0].name } ?? "best"
+            let versus = rank == 1 ? "soonest" : "+\(Format.ms(value - best)) vs \(bestName)"
+            long = "\(server.name) › \(domain) · lookup \(Format.ms(lookup)) + 3 × connection \(Format.ms(connection)) = \(Format.ms(value)) · \(versus)"
+            medium = "\(server.name) › \(domain) · \(Format.ms(value)) · \(rank == 1 ? "soonest" : "+\(Format.ms(value - best))")"
+            short = "\(server.name) › \(domain) · \(Format.ms(value))"
+        } else if model.source.usesConnections {
+            let addresses = server.destinations?[domain]?.joined(separator: ", ") ?? "no address"
+            if value.isNaN {
+                long = "\(server.name) › \(domain) · no server address from this DNS"
+                medium = long
+                short = "\(server.name) › \(domain) · no address"
+            } else if value.isInfinite {
+                long = "\(server.name) › \(domain) · couldn't connect to \(addresses)"
+                medium = "\(server.name) › \(domain) · couldn't connect"
+                short = medium
+            } else {
+                let rank = 1 + (0..<model.n).filter { model.value(r, $0).isFinite && model.value(r, $0) < value }.count
+                let best = model.rowBest[r]
+                let bestName = model.rowBestCol[r].map { model.servers[$0].name } ?? "nearest"
+                let versus = rank == 1 ? "nearest" : "+\(Format.ms(value - best)) vs \(bestName)"
+                long = "\(server.name) › \(domain) · server \(addresses) · connects in \(Format.ms(value)) · \(versus)"
+                medium = "\(server.name) › \(domain) · \(Format.ms(value)) · \(rank == 1 ? "nearest" : "+\(Format.ms(value - best))")"
+                short = "\(server.name) › \(domain) · \(Format.ms(value))"
+            }
+        } else if value.isNaN {
             long = "\(server.name) › \(domain) · \(server.leftOut?[domain] == nil ? "not tested yet" : "left out: refuses made-up names here, but answers the real website")"
             medium = "\(server.name) › \(domain) · \(server.leftOut?[domain] == nil ? "not tested yet" : "left out")"
             short = medium
@@ -659,7 +718,12 @@ struct InspectorText: View {
         if let b = model.rowBestCol[r], let w = model.rowWorstCol[r] {
             let ratio = model.rowBest[r] > 0 ? model.rowWorst[r] / model.rowBest[r] : 1
             let category = categories[domain].map { " · \($0.title)" } ?? ""
-            long = "\(domain)\(category) · fastest \(model.servers[b].name) \(Format.ms(model.rowBest[r])) · slowest \(model.servers[w].name) \(Format.ms(model.rowWorst[r])) (\(String(format: "%.1f", ratio))×) · avg \(Format.ms(model.rowMean[r])) · \(model.answeredCount(row: r)) of \(model.n) answered"
+            let (low, high, done) = switch model.source {
+            case .lookup: ("fastest", "slowest", "answered")
+            case .connection: ("nearest", "farthest", "connected")
+            case .combined: ("soonest", "latest", "measured")
+            }
+            long = "\(domain)\(category) · \(low) \(model.servers[b].name) \(Format.ms(model.rowBest[r])) · \(high) \(model.servers[w].name) \(Format.ms(model.rowWorst[r])) (\(String(format: "%.1f", ratio))×) · avg \(Format.ms(model.rowMean[r])) · \(model.answeredCount(row: r)) of \(model.n) \(done)"
             short = "\(domain) · \(Format.msValue(model.rowBest[r]))–\(Format.msValue(model.rowWorst[r])) ms"
         }
         return ViewThatFits(in: .horizontal) {
@@ -672,8 +736,9 @@ struct InspectorText: View {
         let server = model.servers[c]
         let mean = model.colMean[c]
         let sites = model.rowOrder.count
-        let long = "\(server.name) · \(server.shortAddress) · avg \(Format.ms(mean)) over \(sites) website\(sites == 1 ? "" : "s") · fastest on \(model.colWins[c]) · no answer on \(model.colNoAnswer[c])"
-        let short = "\(server.name) · avg \(Format.ms(mean)) · fastest on \(model.colWins[c])"
+        let isConnection = model.source.usesConnections
+        let long = "\(server.name) · \(server.shortAddress) · avg \(isConnection ? "connection " : "")\(Format.ms(mean)) over \(sites) website\(sites == 1 ? "" : "s") · \(isConnection ? "nearest" : "fastest") on \(model.colWins[c]) · \(isConnection ? "couldn't connect" : "no answer") on \(model.colNoAnswer[c])"
+        let short = "\(server.name) · avg \(Format.ms(mean)) · \(isConnection ? "nearest" : "fastest") on \(model.colWins[c])"
         return HStack(spacing: 6) {
             ServerAvatar(name: server.avatarName, color: server.color, isSystem: server.isSystem, size: 14)
             ViewThatFits(in: .horizontal) {
@@ -796,7 +861,11 @@ struct WebsiteDrillDown: View {
                 if let category { CategoryIcon(category: category, size: 20) }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(domain).font(.headline)
-                    Text("\(model.n) server\(model.n == 1 ? "" : "s") · \(rounds) lookup\(rounds == 1 ? "" : "s") each")
+                    Text(model.source == .combined
+                         ? "\(model.n) server\(model.n == 1 ? "" : "s") · lookup time plus three trips to the server each one pointed to"
+                         : model.source == .connection
+                         ? "\(model.n) server\(model.n == 1 ? "" : "s") · time to connect to the server each one pointed to"
+                         : "\(model.n) server\(model.n == 1 ? "" : "s") · \(rounds) lookup\(rounds == 1 ? "" : "s") each")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -823,11 +892,13 @@ struct WebsiteDrillDown: View {
                                     .font(.callout.monospacedDigit())
                                     .frame(width: 64, alignment: .trailing)
                             } else {
-                                Text(value.isInfinite ? "No answer" : server.leftOut?[domain] == nil ? "Not tested" : "Left out")
+                                Text(model.source.usesConnections
+                                     ? (value.isInfinite ? "Couldn't connect" : "No address")
+                                     : (value.isInfinite ? "No answer" : server.leftOut?[domain] == nil ? "Not tested" : "Left out"))
                                     .font(.callout)
                                     .foregroundStyle(value.isInfinite ? Color.red : .secondary)
                             }
-                            if let stat, stat.failures > 0, value.isFinite {
+                            if model.source != .connection, let stat, stat.failures > 0, value.isFinite {
                                 Text("\(stat.failures) failed").font(.caption2).foregroundStyle(.orange)
                             }
                         }

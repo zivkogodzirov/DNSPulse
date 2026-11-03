@@ -5,7 +5,10 @@ struct BenchmarkView: View {
     @EnvironmentObject private var engine: BenchmarkEngine
 
     var body: some View {
-        let shownRun = engine.run ?? store.history.first
+        // Once a test has finished, its saved copy, which later changes (such as the destination check) are saved into.
+        let shownRun = engine.isRunning
+            ? engine.run ?? store.history.first
+            : engine.run.map { finished in store.history.first { $0.id == finished.id } ?? finished } ?? store.history.first
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 ControlPanel()

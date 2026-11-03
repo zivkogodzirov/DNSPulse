@@ -100,7 +100,7 @@ struct ComparisonVerdict {
     /// Below this, a difference is too small to matter, as on the winner banner.
     static let smallChange = 0.03
 
-    init?(_ result: ServerResult, against baseline: ServerResult, metric: RankingMetric) {
+    init?(_ result: ServerResult, against baseline: ServerResult, metric: RankingMetric, in run: BenchmarkRun) {
         let value = result.value(for: metric)
         let base = baseline.value(for: metric)
         guard result.successes > 0, baseline.successes > 0, value.isFinite, base.isFinite, base > 0 else { return nil }
@@ -108,7 +108,7 @@ struct ComparisonVerdict {
         change = difference / base
         if abs(change) < Self.smallChange {
             kind = .same
-        } else if let tied = result.isTied(with: baseline, by: metric) {
+        } else if let tied = run.isTied(result, baseline, by: metric) {
             kind = tied ? .same : value < base ? .faster : .slower
         } else {
             kind = .untested
@@ -187,7 +187,7 @@ struct ComparisonHistory {
                 var record = records[key, default: Record()]
                 record.tests += 1
                 if key == fastest { record.fastest += 1 }
-                if let base, key != base.matchKey, let verdict = ComparisonVerdict(result, against: base, metric: metric) {
+                if let base, key != base.matchKey, let verdict = ComparisonVerdict(result, against: base, metric: metric, in: run) {
                     switch verdict.kind {
                     case .faster: record.faster += 1
                     case .slower: record.slower += 1

@@ -77,6 +77,10 @@ enum TestMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
 enum RankingMetric: String, Codable, CaseIterable, Identifiable {
     case score, average, median, p95, minimum
+    /// Lookup plus the trips to the server the DNS chose (see `DestinationReport.tripsPerNewWebsite`).
+    case lookupAndConnection
+    /// Average time to connect to the servers the DNS chose.
+    case serverDistance
 
     var id: String { rawValue }
 
@@ -87,6 +91,8 @@ enum RankingMetric: String, Codable, CaseIterable, Identifiable {
         case .median: "Median"
         case .p95: "95th percentile"
         case .minimum: "Fastest response"
+        case .lookupAndConnection: "Lookup + connection"
+        case .serverDistance: "Server distance"
         }
     }
 
@@ -97,8 +103,16 @@ enum RankingMetric: String, Codable, CaseIterable, Identifiable {
         case .median: "median"
         case .p95: "95th pct"
         case .minimum: "best"
+        case .lookupAndConnection: "lookup + connection"
+        case .serverDistance: "distance"
         }
     }
+
+    /// Needs the test's destination check (see `DestinationChecker`); tests without one rank by Overall score.
+    var needsConnections: Bool { self == .lookupAndConnection || self == .serverDistance }
+
+    /// A single best answer has no spread to test, so the fastest response can't say whether a lead is real.
+    var hasNoiseTest: Bool { self != .minimum }
 
     var help: String {
         switch self {
@@ -107,6 +121,8 @@ enum RankingMetric: String, Codable, CaseIterable, Identifiable {
         case .median: "The middle answer time — ignores occasional slow outliers."
         case .p95: "95% of lookups were at least this fast. Good for spotting servers with bad slow spikes."
         case .minimum: "The single quickest answer — roughly the network round-trip to the server."
+        case .lookupAndConnection: "Estimated time before a new website can start loading: the Overall score plus three trips to the server the DNS sent you to (connecting, securing the connection and asking for the page). Needs the test's “where each DNS sends you” check; tests without it are ranked by Overall score."
+        case .serverDistance: "Average time to connect to the servers this DNS sent you to: lower means it picks nearer copies of websites. Needs the test's “where each DNS sends you” check; tests without it are ranked by Overall score."
         }
     }
 }
@@ -128,6 +144,8 @@ struct AppSettings: Codable, Equatable {
     var schedule: CheckSchedule = .off
     var notifyOnProblems = false
     var playSound = true
+    /// Runs the destination check (see `DestinationChecker`) after every test you start that can have one.
+    var checkDestinations = false
     /// The `DefaultData.serverCatalog` the saved server list has caught up with.
     var serverCatalog = DefaultData.serverCatalog
 
@@ -151,6 +169,7 @@ struct AppSettings: Codable, Equatable {
         schedule = c.value(.schedule, default: d.schedule)
         notifyOnProblems = c.value(.notifyOnProblems, default: d.notifyOnProblems)
         playSound = c.value(.playSound, default: d.playSound)
+        checkDestinations = c.value(.checkDestinations, default: d.checkDestinations)
         // Settings saved before this was recorded go with a server list from before any additions.
         serverCatalog = c.value(.serverCatalog, default: 0)
     }

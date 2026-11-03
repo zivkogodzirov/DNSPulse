@@ -116,6 +116,7 @@ struct DomainMatrixView: View {
     @AppStorage("websites.values") private var valueMode: ValueMode = .milliseconds
     @AppStorage("websites.markBest") private var markBest = true
     @AppStorage("websites.columns") private var preset: ColumnPreset = .all
+    @AppStorage("websites.source") private var source: GridSource = .lookup
     @State private var search = ""
     @State private var order: MatrixOrder = .slowest
     @State private var serverSort: ServerSort?
@@ -136,7 +137,7 @@ struct DomainMatrixView: View {
         // A per-server sort only applies while that server's column is shown (presets and hiding can remove it).
         let activeSort = isLive ? nil : serverSort.flatMap { sort in columns.contains { $0.id == sort.id } ? sort : nil }
         let model = GridModel(run: run, servers: columns, colour: colour, search: search, categories: categories,
-                              order: isLive ? .list : order, serverSort: activeSort)
+                              order: isLive ? .list : order, serverSort: activeSort, source: shownSource)
         let available = widthLimit > 0 ? min(width, widthLimit) : width
         let layout = GridLayout(available: available, labels: model.labels)
         let first = min(firstColumn, max(0, columns.count - layout.visibleColumns))
@@ -155,10 +156,15 @@ struct DomainMatrixView: View {
                 }
             VStack(alignment: .leading, spacing: 14) {
                 if ranked.count >= 6, !isLive {
+                    let verb = switch model.source {
+                    case .lookup: "resolve"
+                    case .connection: "connect to"
+                    case .combined: "start loading"
+                    }
                     HStack(alignment: .top, spacing: 12) {
-                        DomainHighlights(title: "Quickest to resolve", icon: "hare.fill", tint: .green,
+                        DomainHighlights(title: "Quickest to \(verb)", icon: "hare.fill", tint: .green,
                                          rows: ranked.prefix(5).map { (model.domains[$0], model.rowMean[$0]) })
-                        DomainHighlights(title: "Slowest to resolve", icon: "tortoise.fill", tint: .red,
+                        DomainHighlights(title: "Slowest to \(verb)", icon: "tortoise.fill", tint: .red,
                                          rows: ranked.suffix(5).reversed().map { (model.domains[$0], model.rowMean[$0]) })
                     }
                 }
@@ -236,10 +242,24 @@ struct DomainMatrixView: View {
 
     }
 
+    /// Connection times once the test's destinations have been checked; lookup times otherwise.
+    private var shownSource: GridSource {
+        !isLive && run.destinationCheck != nil ? source : .lookup
+    }
+
     // MARK: Toolbar
 
     @ViewBuilder
     private func toolbar(model: GridModel, shown: Int, dark: Bool, available: CGFloat) -> some View {
+        let sourcePicker = Picker("Show", selection: $source) {
+            ForEach(GridSource.allCases) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .help("Lookup time: how fast each DNS answered. Connection time: how long it takes to connect to the server each DNS pointed to, which shows whether it sends you to a near or far copy of the website. Lookup + connection: the two together, as a new visit uses them: one lookup, then three trips to the server.")
+        let showsSourcePicker = !isLive && run.destinationCheck != nil
+
         let filter = HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             TextField("Filter websites or categories", text: $search)
@@ -315,6 +335,7 @@ struct DomainMatrixView: View {
         // Pick the widest arrangement that really fits, instead of guessing a breakpoint.
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 10) {
+                if showsSourcePicker { sourcePicker }
                 filter
                 sortControls
                 serversMenu
@@ -325,6 +346,7 @@ struct DomainMatrixView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
+                    if showsSourcePicker { sourcePicker }
                     filter
                     sortControls
                     Spacer(minLength: 0)
@@ -338,6 +360,7 @@ struct DomainMatrixView: View {
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
+                if showsSourcePicker { sourcePicker }
                 HStack(spacing: 10) {
                     filter
                     sortControls
@@ -511,6 +534,23 @@ struct DomainMatrixView: View {
     }
 
     private var footnote: String {
+        if shownSource == .combined {
+            let base = colour == .time
+                ? "Each website's average lookup time plus three times the time to connect to the server that DNS pointed to: about how soon a new visit to the website can start loading (one lookup, then connecting, securing the connection and asking for the page)."
+                : "Colour shows how much later each DNS gets the website started than the soonest one."
+            let numbers = valueMode == .delta ? " “+N” = milliseconds later than the soonest." : ""
+            let outline = markBest ? " · outlined = soonest for that website" : ""
+            return base + numbers + " ✕ couldn't connect or never answered · empty = no address from that DNS · orange corner = some lookups failed" + outline + " · hover a cell to see the lookup and connection parts."
+        }
+        if shownSource == .connection {
+            let base = colour == .time
+                ? "Time to connect to the server each DNS pointed to for each website (best of 3 tries; the average when a DNS gave several). Nearer servers connect sooner, and every new connection pays that distance about three times."
+                : "Colour shows how much slower each connection was than to the nearest server any DNS found for that website."
+            let numbers = valueMode == .delta ? " “+N” = milliseconds slower than the nearest." : ""
+            let outline = markBest ? " · outlined = nearest for that website" : ""
+            let checked = run.destinationCheck.map { " Checked \(Format.date($0.date))." } ?? ""
+            return base + numbers + " ✕ couldn't connect · empty = no address from that DNS" + outline + " · click a website for every server's time." + checked
+        }
         let base = colour == .time
             ? "Average milliseconds per website over \(run.rounds) round\(run.rounds == 1 ? "" : "s"). Colours use a log scale, so 20 ms and 40 ms stay distinguishable next to 500 ms sites."
             : "Colour shows how much slower each server was than that website's fastest server (2× = twice as long)."

@@ -24,7 +24,7 @@
 
 ## Download
 
-1. Download **DNS-Pulse-1.0.0.dmg** from the [latest release](https://github.com/zivkogodzirov/DNSPulse/releases/latest).
+1. Download **DNS-Pulse-1.1.0.dmg** from the [latest release](https://github.com/zivkogodzirov/DNSPulse/releases/latest).
 2. Open it and drag **DNS Pulse** into **Applications**.
 3. Open DNS Pulse from Applications.
 
@@ -68,6 +68,9 @@ xattr -dr com.apple.quarantine "/Applications/DNS Pulse.app"
   - *Cached* primes every resolver first, so it measures pure response time.
   - *Uncached* adds a random sub-domain to force a full recursive lookup.
 - Record types A, AAAA, HTTPS, MX, TXT and NS. Rounds, timeout, parallel lookups and ordering are all adjustable.
+- **Pause between websites** spaces out the start of each website's lookups across the whole test, so lookups don't
+  leave in bursts. Some routers and ISPs drop part of a burst of plain DNS, which shows up as timeouts; a pause of
+  50–100 ms avoids that.
 
 ### Results
 - **Live leaderboard** with an overall score, average, median, 95th percentile, jitter and answer rate.
@@ -77,6 +80,15 @@ xattr -dr com.apple.quarantine "/Applications/DNS Pulse.app"
 - **Website Times grid:** every website × every server, colour-coded on a log scale.
 - **Charts:** score, consistency range, per-round trend and reliability.
 - **Retest failed lookups** to rule out a passing Wi-Fi dropout, and **re-test the leaders** with more rounds.
+- **Where each DNS sends you:** big websites run copies in many places, and the DNS answer picks which one you
+  connect to. After a Real-world or Cached test, DNS Pulse can connect to the server each DNS pointed to for every
+  website and show which DNS sends you to nearer ones: per server ("nearest server on 92 of 100 websites"), in the
+  Website Times grid as connection times or as lookup + connection per website, in Compare, and as a per-website estimate that adds lookup time and
+  distance together. Run it from the results, or switch it on in Settings to run after every test.
+- **Rank by** overall score, average, median, 95th percentile or fastest response, or, once a test's destinations
+  are checked, by **Lookup + connection** (the estimated time before a new website can start loading) or **Server
+  distance**. The Leaderboard, Charts, winner and advice all follow the choice, in the results or in Settings, and a
+  switch above the Leaderboard and Charts flips between them and names each one's winner.
 
 <p align="center">
   <img src="docs/screenshots/compare.png" width="440" alt="Compare tab: verdicts against your current DNS and a side-by-side table">
@@ -112,12 +124,15 @@ xattr -dr com.apple.quarantine "/Applications/DNS Pulse.app"
 | **Score** | The average response time with each failed lookup counted as a full timeout, so a fast but flaky server can't win. Failures are pooled across servers unless a server fails significantly more often than the rest. |
 | **Ties** | Welch's t-test for averages, Fisher's exact test for failure rates, and distribution-free order-statistic intervals for the median and 95th percentile. |
 | **Uncached mode** | If a server refuses a made-up name but answers the real website, that lookup is left out rather than counted against it. |
+| **Server distance** | A TCP handshake (one round trip, no request sent) to the first address of each answer, best of 3 tries, 8 servers at a time. A server's choice counts as farther when it's at least 5 ms and 30% slower to connect to than the nearest any DNS found for that website. A new website costs one lookup plus about three trips to its server, which the per-website estimate uses. |
 
 ## Privacy
 
 DNS Pulse has no accounts, analytics or tracking. Your tests, settings and history stay on your Mac in
-`~/Library/Application Support/DNS Pulse/`. The only network traffic is DNS lookups: to the servers you test, to
+`~/Library/Application Support/DNS Pulse/`. The network traffic is DNS lookups: to the servers you test, to
 `dnscheck.tools` to name your resolver, and to Google, Cloudflare and Akamai's "who am I" names when you diagnose a server.
+When you check where each DNS sends you, DNS Pulse also opens and closes a connection to each website server the
+answers pointed to, without sending a request.
 
 ## Build from source
 

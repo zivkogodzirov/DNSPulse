@@ -44,6 +44,7 @@ struct RetestFailuresBar: View {
             .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            .help(failed > 0 ? failureDetails : "")
             Spacer(minLength: 12)
             if allowsRetest, failed > 0 {
                 Button { engine.retestFailures(of: run, store: store) } label: {
@@ -72,6 +73,41 @@ struct RetestFailuresBar: View {
             text += " Best score: \(name)\(Format.ms(before)) → \(best.name) \(Format.ms(best.score))."
         }
         return text
+    }
+
+    /// For hovering over the summary: each website with failed lookups and the servers they failed on, most first.
+    private var failureDetails: String {
+        var sites: [String: [(server: ServerResult, count: Int)]] = [:]
+        for result in run.results {
+            for (domain, stat) in result.domainStats where stat.failures > 0 {
+                sites[domain, default: []].append((result, stat.failures))
+            }
+        }
+        let ordered = sites.map { (domain: $0.key, servers: $0.value.sorted { $0.count > $1.count }) }
+            .sorted { a, b in
+                let x = a.servers.reduce(0) { $0 + $1.count }, y = b.servers.reduce(0) { $0 + $1.count }
+                return x != y ? x > y : a.domain < b.domain
+            }
+        let shownSites = 12, shownServers = 6
+        var lines = ordered.prefix(shownSites).map { site in
+            let names = site.servers.prefix(shownServers).map { "\($0.server.name)\($0.count > 1 ? " ×\($0.count)" : "") (\(Self.failureKind(of: $0.server)))" }
+            let more = site.servers.count > shownServers ? " and \(site.servers.count - shownServers) more" : ""
+            return "\(site.domain): " + names.joined(separator: ", ") + more
+        }
+        if ordered.count > shownSites { lines.append("…and \(ordered.count - shownSites) more websites") }
+        let plainFailed = ordered.contains { $0.servers.contains { $0.server.proto == .udp } }
+        if run.interceptionDetected == true, plainFailed {
+            lines.append("")
+            lines.append("Plain DNS is intercepted on this network, so its failures were your network's own resolver not answering, whichever server they were sent to.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// What went wrong. A test counts failures per website, but keeps their kind only per server.
+    private static func failureKind(of result: ServerResult) -> String {
+        if result.timeouts == result.failures { return "timed out" }
+        if result.serverErrors == result.failures || result.networkErrors == result.failures { return result.lastError ?? "error" }
+        return "timed out or error"
     }
 
     private func lookups(_ count: Int) -> String { count == 1 ? "lookup" : "lookups" }

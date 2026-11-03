@@ -67,11 +67,12 @@ enum CommandLineRunner {
         await BenchmarkCore.warmUp(targets: targets, domains: domains, config: config)
 
         var done = 0
+        let pacer = LookupPacer(delayMs: config.delayMs)
         await withTaskGroup(of: [BenchmarkSample].self) { group in
             var pending = jobs.makeIterator()
             for _ in 0..<config.parallelism {
                 guard let job = pending.next() else { break }
-                group.addTask { await BenchmarkCore.perform(job, targets: targets, config: config) }
+                group.addTask { await BenchmarkCore.perform(job, targets: targets, config: config, pacer: pacer) }
             }
             for await samples in group {
                 for sample in samples { results[sample.serverID]?.record(sample) }
@@ -80,7 +81,7 @@ enum CommandLineRunner {
                     print("  \(Int(Double(done) / Double(jobs.count) * 100))%")
                 }
                 if let job = pending.next() {
-                    group.addTask { await BenchmarkCore.perform(job, targets: targets, config: config) }
+                    group.addTask { await BenchmarkCore.perform(job, targets: targets, config: config, pacer: pacer) }
                 }
             }
         }

@@ -58,7 +58,9 @@ extension BenchmarkEngine {
         pendingOptions = options
         defer { pendingOptions = RunOptions() }
         start(servers: servers, domains: domains, settings: settings) { [weak store] run in
-            store?.addRun(run)
+            guard let store else { return }
+            store.addRun(run)
+            DestinationChecker.shared.checkAfterTest(run, store: store, isQuiet: options.isQuiet)
             onSaved?(run)
         }
     }

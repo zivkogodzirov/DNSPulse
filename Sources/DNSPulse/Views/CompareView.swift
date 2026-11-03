@@ -25,7 +25,7 @@ struct CompareView: View {
                 } else {
                     VerdictCards(run: run, servers: servers, baseline: baseline, metric: metric)
                 }
-                CompareTable(servers: servers, baseline: baseline)
+                CompareTable(servers: servers, baseline: baseline, destinations: isLive ? nil : run.destinations)
                 if servers.filter({ $0.successes > 0 }).count >= 2 {
                     CompareCard(title: "How quickly lookups finish", subtitle: "Share of lookups answered within each time · higher and further left is better · hover to read any time", icon: "chart.line.uptrend.xyaxis") {
                         SpeedCurveChart(servers: servers.filter { $0.successes > 0 })
@@ -229,7 +229,7 @@ private struct VerdictCard: View {
     let metric: RankingMetric
 
     var body: some View {
-        let verdict = ComparisonVerdict(result, against: baseline, metric: metric)
+        let verdict = ComparisonVerdict(result, against: baseline, metric: metric, in: run)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 ServerAvatar(name: result.avatarName, color: result.color, isSystem: result.isSystem, size: 20)
@@ -297,19 +297,33 @@ private struct VerdictBadge: View {
 private struct CompareTable: View {
     let servers: [ServerResult]
     let baseline: ServerResult
+    /// Adds rows on how near the servers each DNS sent you to were, once they've been checked.
+    let destinations: DestinationReport?
 
     @Environment(\.accent) private var accent
 
     private struct Measure: Identifiable {
+        enum Unit { case ms, rate, websites }
+
         let title: String
         let help: String
         let value: (ServerResult) -> Double
         var higherIsBetter = false
-        var isRate = false
+        var unit = Unit.ms
         var id: String { title }
     }
 
-    private let measures: [Measure] = [
+    private var measures: [Measure] {
+        guard let destinations, destinations.isChecked else { return lookupMeasures }
+        return lookupMeasures + [
+            Measure(title: "Server distance", help: "Median time to connect to the servers this DNS sent you to. Lower means nearer copies of the websites.",
+                    value: { destinations.summaries[$0.id]?.medianTime ?? .nan }),
+            Measure(title: "Sent farther on", help: "Websites where this DNS sent you to a clearly farther server than the nearest any DNS found.",
+                    value: { destinations.summaries[$0.id].map { Double($0.farther) } ?? .nan }, unit: .websites),
+        ]
+    }
+
+    private let lookupMeasures: [Measure] = [
         Measure(title: "Overall score", help: RankingMetric.score.help, value: \.score),
         Measure(title: "Average", help: RankingMetric.average.help, value: { $0.stats.mean }),
         Measure(title: "Median", help: RankingMetric.median.help, value: { $0.stats.median }),
@@ -318,7 +332,7 @@ private struct CompareTable: View {
         Measure(title: "Slowest", help: "The slowest answered lookup.", value: { $0.stats.maximum }),
         Measure(title: "Jitter", help: "How much response times vary (standard deviation). Lower is steadier.", value: { $0.stats.stdDev }),
         Measure(title: "Answered", help: "Share of lookups that got an answer.", value: { $0.attempts > 0 ? $0.successRate : .nan },
-                higherIsBetter: true, isRate: true),
+                higherIsBetter: true, unit: .rate),
     ]
 
     var body: some View {
@@ -359,7 +373,7 @@ private struct CompareTable: View {
                 let value = values[index]
                 let isBest = value.isFinite && value == best
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text(measure.isRate ? (value.isFinite ? Format.percent(value) : "—") : Format.ms(value))
+                    Text(text(value, measure: measure, server: server))
                         .font(.callout.monospacedDigit().weight(isBest ? .bold : .regular))
                     if server.id != baseline.id, let change = change(value, from: base, measure: measure) {
                         Text(change).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
@@ -372,12 +386,30 @@ private struct CompareTable: View {
         }
     }
 
-    /// "33% less" or "20% more" time than the baseline; for the answered share, the difference in points.
+    private func text(_ value: Double, measure: Measure, server: ServerResult) -> String {
+        guard value.isFinite else { return "—" }
+        switch measure.unit {
+        case .ms: return Format.ms(value)
+        case .rate: return Format.percent(value)
+        case .websites:
+            let total = destinations?.summaries[server.id]?.websites ?? 0
+            return "\(Int(value)) of \(total)"
+        }
+    }
+
+    /// "33% less" or "20% more" time than the baseline; for the answered share, the difference in points; for
+    /// websites, the difference in websites.
     private func change(_ value: Double, from base: Double, measure: Measure) -> String? {
         guard value.isFinite, base.isFinite else { return nil }
-        if measure.isRate {
+        switch measure.unit {
+        case .rate:
             let points = (value - base) * 100
             return abs(points) < 0.05 ? "same" : String(format: "%+.1f pts", points)
+        case .websites:
+            let difference = Int(value - base)
+            return difference == 0 ? "same" : String(format: "%+d", difference)
+        case .ms:
+            break
         }
         guard base > 0 else { return nil }
         let percent = Int(((value - base) / base * 100).rounded())

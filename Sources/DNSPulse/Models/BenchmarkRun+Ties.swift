@@ -12,17 +12,60 @@ extension BenchmarkRun {
     ///   roughly a 5% test and, like the median, ignores how far the outliers are. Too few lookups to bound
     ///   the quantile (such as a 95th percentile from 20 lookups) also means tied.
     /// - Fastest response: a single best answer has no spread to test, so nothing is reported as tied.
+    /// - Lookup + connection and server distance: compared website by website (see `connectionsTied`).
     ///
     /// When the winner is the DNS the Mac already uses, the other row for that same server is left out.
     func findTies(by metric: RankingMetric) -> [ServerResult] {
-        guard metric != .minimum else { return [] }
+        let metric = usableMetric(metric)
+        guard metric.hasNoiseTest else { return [] }
         let answered = ranked(by: metric).filter { $0.successes > 0 && $0.value(for: metric).isFinite }
         guard let winner = answered.first, winner.successes >= 2 else { return [] }
-        let reference = TieSample(winner, metric: metric)
         let winnerIsCurrent = isCurrentDNS(winner)
-        return answered.dropFirst().filter {
-            !(winnerIsCurrent && isCurrentDNS($0)) && reference.isTied(with: TieSample($0, metric: metric))
+        let others = answered.dropFirst().filter { !(winnerIsCurrent && isCurrentDNS($0)) }
+        if metric.needsConnections {
+            return others.filter { connectionsTied(winner, $0, by: metric) }
         }
+        let reference = TieSample(winner, metric: metric)
+        return others.filter { reference.isTied(with: TieSample($0, metric: metric)) }
+    }
+
+    /// Whether this test can't tell `a` and `b` apart for `metric`, by the rules `findTies(by:)` uses. Nil for the
+    /// fastest response, which has no spread to test.
+    func isTied(_ a: ServerResult, _ b: ServerResult, by metric: RankingMetric) -> Bool? {
+        let metric = usableMetric(metric)
+        guard metric.hasNoiseTest else { return nil }
+        if metric.needsConnections { return connectionsTied(a, b, by: metric) }
+        return TieSample(a, metric: metric).isTied(with: TieSample(b, metric: metric))
+    }
+
+    /// The ranking this test can use: the connection-based ones need its destination check, and rank by the score
+    /// without it (see `ServerResult.value(for:)`).
+    func usableMetric(_ metric: RankingMetric) -> RankingMetric {
+        metric.needsConnections && !destinations.isChecked ? .score : metric
+    }
+
+    /// Compares two servers website by website: for each website both reached, the difference between their values,
+    /// then whether those differences average out to more than noise (a paired t-test). Pairing takes out what the
+    /// websites themselves add, as a far-away website is far for both. Lookup + connection also needs failures
+    /// tied, as the score does. Too few websites to compare counts as tied.
+    private func connectionsTied(_ a: ServerResult, _ b: ServerResult, by metric: RankingMetric) -> Bool {
+        let report = destinations
+        let trips = metric == .lookupAndConnection ? DestinationReport.tripsPerNewWebsite : 1
+        var differences: [Double] = []
+        for domain in domains {
+            guard let connectA = report.time(a.id, domain), let connectB = report.time(b.id, domain),
+                  connectA.isFinite, connectB.isFinite else { continue }
+            var difference = trips * (connectA - connectB)
+            if metric == .lookupAndConnection {
+                guard let lookupA = a.domainStats[domain]?.mean, let lookupB = b.domainStats[domain]?.mean else { continue }
+                difference += lookupA - lookupB
+            }
+            differences.append(difference)
+        }
+        guard let p = Statistics.pairedPValue(differences) else { return true }
+        let failuresTied = metric != .lookupAndConnection
+            || Statistics.fisherExactPValue(a.failures, of: a.attempts, b.failures, of: b.attempts) >= 0.05
+        return p >= 0.05 && failuresTied
     }
 
     /// Rounds for a follow-up test of tied servers: at least 5, and twice what this run used.
@@ -32,15 +75,6 @@ extension BenchmarkRun {
     /// only with more rounds.
     var retestOverrides: TestOverrides {
         TestOverrides(rounds: retestRounds, mode: mode, recordType: recordType, domains: domains, timeoutMs: timeoutMs)
-    }
-}
-
-extension ServerResult {
-    /// Whether a test can't tell this server and `other` apart for `metric`, by the rules `findTies(by:)` uses.
-    /// Nil for the fastest response, which has no spread to test.
-    func isTied(with other: ServerResult, by metric: RankingMetric) -> Bool? {
-        guard metric != .minimum else { return nil }
-        return TieSample(self, metric: metric).isTied(with: TieSample(other, metric: metric))
     }
 }
 
@@ -71,7 +105,7 @@ private struct TieSample {
         case .median, .p95:
             guard let interval, let otherInterval = other.interval else { return false }
             return interval.overlaps(otherInterval)
-        case .minimum:
+        case .minimum, .lookupAndConnection, .serverDistance:
             return false
         }
     }

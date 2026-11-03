@@ -19,6 +19,16 @@ enum Statistics {
         return studentTwoSided(t: t, df: df)
     }
 
+    /// Two-sided p-value of a paired t-test: whether `differences`, one per matched pair, average out to more than
+    /// zero. Nil with fewer than two pairs.
+    static func pairedPValue(_ differences: [Double]) -> Double? {
+        guard differences.count >= 2 else { return nil }
+        let stats = LatencyStats(differences)
+        guard stats.stdDev > 0 else { return stats.mean == 0 ? 1 : 0 }
+        let t = stats.mean / (stats.stdDev / Double(stats.count).squareRoot())
+        return studentTwoSided(t: t, df: Double(stats.count - 1))
+    }
+
     /// Two-sided p-value of Fisher's exact test: how likely `failuresA` of `attemptsA` and `failuresB` of
     /// `attemptsB` are if both sides fail equally often. Exact, so it stays right for rare failures (0 of 1,000
     /// against 5 of 1,000), where a t-test or normal approximation does not.

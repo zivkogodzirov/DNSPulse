@@ -22,7 +22,9 @@ struct ResultsView: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
-        let metric = store.settings.rankingMetric
+        let chosen = store.settings.rankingMetric
+        // The connection-based rankings need the destination check; until then this test ranks by the score.
+        let metric = chosen.needsConnections && !run.destinations.isChecked ? .score : chosen
         let ranked = run.ranked(by: metric)
         let hasAnswers = ranked.contains { $0.successes > 0 }
         let tied = isLive ? [] : run.tiedWithWinner(by: metric)
@@ -42,15 +44,30 @@ struct ResultsView: View {
             if hasAnswers {
                 InsightsGrid(run: run, ranked: ranked, metric: metric)
             }
+            if !isLive, run.status != .running {
+                DestinationBar(run: run, ranked: ranked)
+                if chosen != metric {
+                    Label(fallbackReason(for: chosen), systemImage: "info.circle")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
             ResultsTabPicker()
 
             ShownResultsTab { tab in
                 switch tab {
                 case .leaderboard:
-                    LeaderboardView(run: run, ranked: ranked, metric: metric, isLive: isLive)
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !isLive, run.destinations.isChecked { RankingSwitch(run: run) }
+                        LeaderboardView(run: run, ranked: ranked, metric: metric, isLive: isLive)
+                    }
                 case .charts:
-                    ChartsView(run: run, ranked: ranked, metric: metric)
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !isLive, run.destinations.isChecked { RankingSwitch(run: run) }
+                        ChartsView(run: run, ranked: ranked, metric: metric)
+                    }
                 case .statistics:
                     StatisticsTable(ranked: ranked)
                 case .websites:
@@ -61,6 +78,19 @@ struct ResultsView: View {
             }
         }
         .dnsActionSheets()
+    }
+
+    /// Why this test ranks by the score instead of a connection-based ranking.
+    private func fallbackReason(for chosen: RankingMetric) -> String {
+        let start = "Ranked by Overall score"
+        if run.destinations.canCheck {
+            return "\(start) for now: ranking by \(chosen.title) needs this test's connection check. Click Check Where They Send You above."
+        } else if run.mode == .uncached {
+            return "\(start): ranking by \(chosen.title) needs a Real-world or Cached test, as Uncached lookups use made-up names that don't point to real servers."
+        } else if !run.recordType.carriesAddresses {
+            return "\(start): ranking by \(chosen.title) needs a test with record type A or AAAA, whose answers are server addresses."
+        }
+        return "\(start): this test is from before DNS Pulse kept the addresses its answers pointed to. Run a new test to rank by \(chosen.title)."
     }
 
     private func header(metric: RankingMetric) -> some View {
@@ -410,9 +440,12 @@ private struct LeaderboardView: View {
 
     var body: some View {
         let maxValue = ranked.map { $0.value(for: metric) }.filter(\.isFinite).max() ?? 1
+        let destinations = isLive ? nil : run.destinations
         VStack(spacing: 0) {
             ForEach(Array(ranked.enumerated()), id: \.element.id) { index, result in
-                LeaderboardRow(run: run, rank: index + 1, result: result, metric: metric, maxValue: max(maxValue, 0.001), isLive: isLive)
+                LeaderboardRow(run: run, rank: index + 1, result: result, metric: metric, maxValue: max(maxValue, 0.001), isLive: isLive,
+                               destination: destinations?.summaries[result.id],
+                               isFartherThanOthers: destinations?.sendsFartherThanOthers(result.id) ?? false)
                 if index < ranked.count - 1 {
                     Divider().padding(.leading, 70)
                 }
@@ -432,6 +465,9 @@ private struct LeaderboardRow: View {
     let metric: RankingMetric
     let maxValue: Double
     let isLive: Bool
+    /// How near the servers it sent you to were, once the test's destinations have been checked.
+    var destination: DestinationReport.Summary?
+    var isFartherThanOthers = false
 
     var body: some View {
         let stats = result.stats
@@ -468,6 +504,11 @@ private struct LeaderboardRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .help("Average ± its 95% margin of error: the true average is very likely in this range. More rounds make it narrower.")
+                    if let destination {
+                        DestinationLine(summary: destination,
+                                        isInterceptorsChoice: run.interceptionDetected == true && result.proto == .udp && !result.isSystem,
+                                        isFartherThanOthers: isFartherThanOthers)
+                    }
                 } else if isLive && result.attempts == 0 && result.lastError == nil {
                     Text("Waiting for answers…").font(.caption).foregroundStyle(.secondary)
                 } else {

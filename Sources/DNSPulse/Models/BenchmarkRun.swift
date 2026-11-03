@@ -135,15 +135,22 @@ struct ServerResult: Identifiable, Codable {
     var roundStats: [BucketStat] = []
     /// Lookups per website that count neither way (see `BenchmarkCore.isLeftOut`). Nil until there is one.
     private(set) var leftOut: [String: Int]?
+    /// Per website, the first address of each answer: up to three different ones, as answers can rotate. Nil when the
+    /// test didn't keep them (Uncached mode, record types without addresses, or tests from before they were kept).
+    private(set) var destinations: [String: [String]]?
     /// The failure rate the score charges, set by the run (see `FailureCharge`); nil charges the server's own.
     var chargedFailureRate: Double?
+    /// Set by the run once its destinations are checked: the average time to connect to the servers this one sent
+    /// you to, nil when none of them connected.
+    var connectionTime: Double?
+    var isConnectionChecked = false
     /// Statistics worked out from the lookups above; `record(_:)` replaces it whenever they change.
     private var cache = ResultStatsCache()
 
-    /// Every stored property except `cache`, so saved files stay exactly as they were.
+    /// Every stored property except the ones the run sets and `cache`, so saved files stay exactly as they were.
     private enum CodingKeys: String, CodingKey {
         case id, name, provider, address, proto, colorHex, isSystem, timeoutMs, latencies, nxdomain, timeouts,
-             serverErrors, networkErrors, lastError, domainStats, roundStats, leftOut
+             serverErrors, networkErrors, lastError, domainStats, roundStats, leftOut, destinations
     }
 
     init(server: DNSServer, address: String, timeoutMs: Int) {
@@ -181,6 +188,17 @@ struct ServerResult: Identifiable, Codable {
         domainStats[sample.domain, default: BucketStat()].add(result)
         while roundStats.count < sample.round { roundStats.append(BucketStat()) }
         roundStats[sample.round - 1].add(result)
+        keepDestination(of: sample)
+    }
+
+    private mutating func keepDestination(of sample: BenchmarkSample) {
+        guard let address = sample.addresses.first else { return }
+        var kept = destinations ?? [:]
+        var addresses = kept[sample.domain] ?? []
+        guard !addresses.contains(address), addresses.count < 3 else { return }
+        addresses.append(address)
+        kept[sample.domain] = addresses
+        destinations = kept
     }
 
     /// Applies a retried lookup to one of its website's failures. One that answered takes the failure's place, and one
@@ -207,6 +225,7 @@ struct ServerResult: Identifiable, Codable {
         cache = ResultStatsCache()
         domainStats[sample.domain]?.replaceFailure(with: result)
         if let round { roundStats[round].replaceFailure(with: result) }
+        keepDestination(of: sample)
         return .answered
     }
 
@@ -269,6 +288,13 @@ struct ServerResult: Identifiable, Codable {
         case .median: return stats.median
         case .p95: return stats.p95
         case .minimum: return stats.minimum
+        // Without the check there's nothing to add, so these rank by the score, as the results page says.
+        case .lookupAndConnection:
+            guard isConnectionChecked else { return score }
+            return connectionTime.map { score + DestinationReport.tripsPerNewWebsite * $0 } ?? .infinity
+        case .serverDistance:
+            guard isConnectionChecked else { return score }
+            return connectionTime ?? .infinity
         }
     }
 
@@ -312,6 +338,7 @@ private final class ResultStatsCache: @unchecked Sendable {
 private final class RunCache: @unchecked Sendable {
     private let lock = NSLock()
     private var charged: [ServerResult]?
+    private var destinations: DestinationReport?
     var ranked: [RankingMetric: [ServerResult]] = [:]
     var ties: [RankingMetric: [ServerResult]] = [:]
 
@@ -321,6 +348,19 @@ private final class RunCache: @unchecked Sendable {
         if let charged { return charged }
         let value = make()
         charged = value
+        return value
+    }
+
+    /// Computes outside the lock: the report reads the charged results, which use this cache too.
+    func destinations(_ make: () -> DestinationReport) -> DestinationReport {
+        lock.lock()
+        let cached = destinations
+        lock.unlock()
+        if let cached { return cached }
+        let value = make()
+        lock.lock()
+        destinations = value
+        lock.unlock()
         return value
     }
 
@@ -362,13 +402,17 @@ struct BenchmarkRun: Identifiable, Codable {
     var trigger: String?
     /// Set once the test's failed lookups have been tried again.
     var retest: RunRetest?
+    /// How near the servers its answers pointed to were (see `DestinationChecker`).
+    var destinationCheck: DestinationCheck? {
+        didSet { cache = RunCache() }
+    }
     /// Rankings and ties worked out from `results`, replaced whenever they change.
     private var cache = RunCache()
 
     /// Every stored property except `cache`, so saved files stay exactly as they were.
     private enum CodingKeys: String, CodingKey {
         case id, date, duration, status, rounds, mode, recordType, timeoutMs, domains, interceptionDetected,
-             networkID, networkName, trigger, retest
+             networkID, networkName, trigger, retest, destinationCheck
         case recorded = "results"
     }
 
@@ -380,9 +424,19 @@ struct BenchmarkRun: Identifiable, Codable {
         self.domains = domains
     }
 
-    /// Every server's results, each scored at the failure rate `FailureCharge` decides for it.
+    /// Every server's results, each scored at the failure rate `FailureCharge` decides for it, with its connection time
+    /// once the destinations are checked.
     var results: [ServerResult] {
-        cache.charged { FailureCharge.apply(to: recorded) }
+        cache.charged {
+            var results = FailureCharge.apply(to: recorded)
+            if let destinationCheck {
+                for index in results.indices {
+                    results[index].isConnectionChecked = true
+                    results[index].connectionTime = DestinationReport.averageConnectionTime(of: results[index], in: destinationCheck)
+                }
+            }
+            return results
+        }
     }
 
     mutating func add(_ result: ServerResult) {
@@ -418,6 +472,11 @@ struct BenchmarkRun: Identifiable, Codable {
     var failedLookups: Int { recorded.reduce(0) { $0 + $1.failures } }
     var leftOutLookups: Int { recorded.reduce(0) { $0 + $1.leftOutLookups } }
     var systemResult: ServerResult? { results.first(where: \.isSystem) }
+
+    /// The destination check's findings, worked out once.
+    var destinations: DestinationReport {
+        cache.destinations { DestinationReport(run: self) }
+    }
 
     /// Computed once per metric. Returning the same array each time also lets SwiftUI see that views built from it
     /// haven't changed.

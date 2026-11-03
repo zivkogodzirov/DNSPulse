@@ -51,6 +51,7 @@ struct Recommendation {
             points.append(Point(id: "tie", icon: "equal.circle.fill", tint: .indigo,
                                 text: "**\(names) are statistically tied**: the differences are within measurement noise. \(advice)"))
         }
+        points += Self.destinationPoints(run: run, ranked: ranked, winner: winner, keepCurrent: keepCurrent, metric: metric, tied: tied)
         if winner.proto == .dot {
             points.append(Point(id: "dot", icon: "lock.fill", tint: .teal,
                                 text: "**\(Self.md(winner.name)) is encrypted DNS (DNS-over-TLS).** macOS network settings only take plain DNS addresses and browsers only offer DoH, so install it as an encrypted DNS profile for the whole Mac."))
@@ -75,10 +76,46 @@ struct Recommendation {
         if let system = run.systemResult, tied.contains(where: { $0.id == system.id }) {
             points.append(Point(id: "saving", icon: "gauge.with.dots.needle.33percent", tint: .secondary,
                                 text: "Your current DNS is statistically tied with \(Self.md(winner.name)), so switching wouldn't make a noticeable speed difference."))
-        } else if let saving = Self.saving(run: run, main: winner, metric: metric, intercepted: intercepted) {
+        } else if !metric.needsConnections, let saving = Self.saving(run: run, main: winner, metric: metric, intercepted: intercepted) {
             points.append(saving)
         }
         self.points = points
+    }
+
+    /// Once the test's destinations are checked: whether the winner sends you to near servers, and what it saves per new
+    /// website against your current DNS once the distance is counted too.
+    private static func destinationPoints(run: BenchmarkRun, ranked: [ServerResult], winner: ServerResult, keepCurrent: Bool,
+                                          metric: RankingMetric, tied: [ServerResult]) -> [Point] {
+        let destinations = run.destinations
+        guard destinations.isChecked, let mine = destinations.summaries[winner.id], mine.websites > 0 else { return [] }
+        var points: [Point] = []
+        if destinations.sendsFartherThanOthers(winner.id), let nearest = destinations.nearestOnAverage(among: ranked),
+           let theirs = destinations.summaries[nearest.id] {
+            points.append(Point(id: "destinations", icon: "location.north.line.fill", tint: .orange,
+                                text: "**\(md(winner.name)) sends you to farther servers than the others:** farther on \(mine.farther) of \(mine.websites) websites, about \(Format.ms(mine.averageExtra - theirs.averageExtra)) more per connection than **\(md(nearest.name))**, whose picks are nearest."))
+        } else {
+            points.append(Point(id: "destinations", icon: "location.north.line.fill", tint: .teal,
+                                text: "**\(md(winner.name)) also sends you to near servers:** the nearest on \(mine.nearest) of \(mine.websites) websites."))
+        }
+
+        // When your current DNS is tied with the winner, the advice already says switching makes no real difference.
+        guard metric.needsConnections, !keepCurrent, let system = run.systemResult, !tied.contains(where: { $0.id == system.id }), let current = destinations.summaries[system.id], system.successes > 0 else { return points }
+        // The lookup part the connection-based ranking uses (see `ServerResult.value(for:)`).
+        let basis = RankingMetric.score
+        let lookup = system.value(for: basis) - winner.value(for: basis)
+        let distance = DestinationReport.tripsPerNewWebsite * (current.averageExtra - mine.averageExtra)
+        guard lookup.isFinite, distance.isFinite else { return points }
+        func part(_ value: Double, _ what: String) -> String {
+            abs(value) < 0.5 ? "about the same \(what)" : "\(Format.ms(abs(value))) \(value > 0 ? "saved" : "lost") \(what)"
+        }
+        let total = lookup + distance
+        let headline = abs(total) < 1
+            ? "**Per new website, about the same as your current DNS**"
+            : "**Per new website, about \(Format.ms(abs(total))) \(total > 0 ? "faster" : "slower") than your current DNS**"
+        points.append(Point(id: "per-website", icon: "stopwatch", tint: total >= 0 ? .green : .orange,
+                            text: "\(headline): \(part(lookup, "on the lookup")) and \(part(distance, "on the way to the server")).",
+                            isEstimate: true))
+        return points
     }
 
     /// Server names go into Markdown, so characters that would start formatting are escaped.
