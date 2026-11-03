@@ -69,7 +69,7 @@ struct ResultsView: View {
                         ChartsView(run: run, ranked: ranked, metric: metric)
                     }
                 case .statistics:
-                    StatisticsTable(ranked: ranked)
+                    StatisticsTable(ranked: ranked, destinations: isLive ? nil : run.destinations)
                 case .websites:
                     DomainMatrixView(run: run, servers: ranked, isLive: isLive, allowsRetest: allowsRetest)
                 case .compare:

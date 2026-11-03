@@ -24,7 +24,7 @@
 
 ## Download
 
-1. Download **DNS-Pulse-1.1.0.dmg** from the [latest release](https://github.com/zivkogodzirov/DNSPulse/releases/latest).
+1. Download **DNS-Pulse-1.1.1.dmg** from the [latest release](https://github.com/zivkogodzirov/DNSPulse/releases/latest).
 2. Open it and drag **DNS Pulse** into **Applications**.
 3. Open DNS Pulse from Applications.
 
@@ -73,7 +73,9 @@ xattr -dr com.apple.quarantine "/Applications/DNS Pulse.app"
   50–100 ms avoids that.
 
 ### Results
-- **Live leaderboard** with an overall score, average, median, 95th percentile, jitter and answer rate.
+- **Live leaderboard** with an overall score, average, median, 95th percentile, jitter and answer rate, and a sortable
+  **Statistics** table that adds lookup + connection, server distance and how often each DNS picked the nearest server
+  once a test's destinations are checked.
 - **Winner banner and "What you should do"** panel: a main and backup DNS, caveats, and an estimated real-world saving.
 - **Compare** up to five servers against a baseline, with a verdict for each: *clearly faster*, *clearly slower* or
   *no real difference*, plus how they did against each other across your saved tests.

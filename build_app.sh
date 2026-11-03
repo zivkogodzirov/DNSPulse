@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 APP_NAME="DNS Pulse"
 EXECUTABLE="DNSPulse"
 BUNDLE_ID="app.dnspulse.DNSPulse"
-VERSION="1.1.0"
+VERSION="1.1.1"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 
 # Universal (Apple silicon and Intel) by default. ARCHS=arm64 ./build_app.sh builds for Apple silicon only, faster.

@@ -4,6 +4,8 @@ import SwiftUI
 
 struct StatisticsTable: View {
     let ranked: [ServerResult]
+    /// Adds the connection columns once the test's destinations are checked.
+    var destinations: DestinationReport?
     @State private var sortOrder = [KeyPathComparator(\Row.rank)]
 
     struct Row: Identifiable {
@@ -23,68 +25,50 @@ struct StatisticsTable: View {
         let jitter: Double
         let success: Double
         let failures: Int
+        /// From the destination check: `.infinity` when there's nothing to show.
+        let lookupAndConnection: Double
+        let distance: Double
+        let nearestShare: Double
+        let nearest: Int
+        let websites: Int
+        let extra: Double
+        let isFarther: Bool
     }
 
     var body: some View {
+        let checked = destinations?.isChecked == true
         let rows = ranked.enumerated().map { index, result in
             let stats = result.stats
+            let summary = checked ? destinations?.summaries[result.id] : nil
             return Row(
                 id: result.id, rank: index + 1, name: result.name, address: result.address, color: result.color,
                 score: result.score, mean: stats.mean, margin: stats.marginOfError, median: stats.median, minimum: stats.minimum,
                 p95: stats.p95, maximum: stats.maximum, jitter: stats.stdDev,
-                success: result.successRate, failures: result.failures
+                success: result.successRate, failures: result.failures,
+                lookupAndConnection: summary == nil ? .infinity : result.value(for: .lookupAndConnection),
+                distance: summary == nil ? .infinity : result.value(for: .serverDistance),
+                nearestShare: summary.map { $0.websites > 0 ? Double($0.nearest) / Double($0.websites) : 0 } ?? -1,
+                nearest: summary?.nearest ?? 0, websites: summary?.websites ?? 0, extra: summary?.averageExtra ?? .infinity,
+                isFarther: destinations?.sendsFartherThanOthers(result.id) ?? false
             )
         }
         .sorted(using: sortOrder)
 
         VStack(alignment: .leading, spacing: 8) {
-            Table(rows, sortOrder: $sortOrder) {
-                TableColumn("#", value: \.rank) { row in
-                    Text("\(row.rank)").monospacedDigit().foregroundStyle(.secondary)
-                }
-                .width(26)
-                TableColumn("Server", value: \.name) { row in
-                    HStack(spacing: 8) {
-                        Circle().fill(row.color).frame(width: 9, height: 9)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(row.name).fontWeight(.medium)
-                            Text(row.address).font(.caption.monospaced()).foregroundStyle(.secondary)
-                        }
+            // Two tables, as choosing columns with `if` needs macOS 14.4.
+            Group {
+                if checked {
+                    Table(rows, sortOrder: $sortOrder) {
+                        leadingColumns
+                        lookupColumns
+                        connectionColumns
+                    }
+                } else {
+                    Table(rows, sortOrder: $sortOrder) {
+                        leadingColumns
+                        lookupColumns
                     }
                 }
-                .width(min: 150, ideal: 180)
-                TableColumn("Score", value: \.score) { row in
-                    Text(Format.ms(row.score)).fontWeight(.semibold).monospacedDigit()
-                }
-                .width(min: 56, ideal: 68, max: 100)
-                TableColumn("Average", value: \.mean) { row in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(Format.ms(row.mean)).monospacedDigit()
-                        if row.mean.isFinite, row.margin.isFinite {
-                            Text("± \(Format.ms(row.margin))").font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .width(min: 58, ideal: 68, max: 100)
-                TableColumn("Median", value: \.median) { Text(Format.ms($0.median)).monospacedDigit() }
-                .width(min: 52, ideal: 62, max: 100)
-                TableColumn("Fastest", value: \.minimum) { Text(Format.ms($0.minimum)).monospacedDigit() }
-                .width(min: 52, ideal: 62, max: 100)
-                TableColumn("95th %", value: \.p95) { Text(Format.ms($0.p95)).monospacedDigit() }
-                .width(min: 52, ideal: 62, max: 100)
-                TableColumn("Slowest", value: \.maximum) { Text(Format.ms($0.maximum)).monospacedDigit() }
-                .width(min: 52, ideal: 62, max: 100)
-                TableColumn("Jitter", value: \.jitter) { Text(Format.ms($0.jitter)).monospacedDigit() }
-                .width(min: 52, ideal: 62, max: 100)
-                TableColumn("Answered", value: \.success) { row in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(Format.percent(row.success)).monospacedDigit()
-                        if row.failures > 0 {
-                            Text("\(row.failures) failed").font(.caption).foregroundStyle(.orange)
-                        }
-                    }
-                }
-                .width(min: 66, ideal: 84)
             }
             .tableStyle(.inset(alternatesRowBackgrounds: true))
             .scrollDisabled(true)
@@ -92,10 +76,88 @@ struct StatisticsTable: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
 
-            Text("Click a column header to sort. **Score** is the average with every failed lookup counted as a full timeout. **Jitter** is the standard deviation — lower means steadier. **±** under the average is its 95% margin of error.")
+            Text(.init("Click a column header to sort. **Score** is the average with every failed lookup counted as a full timeout. **Jitter** is the standard deviation — lower means steadier. **±** under the average is its 95% margin of error."
+                       + (checked ? " **Lookup + conn.** is the score plus three trips to the server each DNS sent you to; **Distance** is the average time to connect to those servers; **Nearest on** counts the websites where its server was about as near as the best any DNS found, with the average extra time per connection below (orange when clearly farther than the others)." : "")))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    // Three groups: a table takes at most ten columns per block, and the type checker can't take them all at once.
+
+    @TableColumnBuilder<Row, KeyPathComparator<Row>>
+    private var leadingColumns: some TableColumnContent<Row, KeyPathComparator<Row>> {
+        TableColumn("#", value: \.rank) { row in
+            Text("\(row.rank)").monospacedDigit().foregroundStyle(.secondary)
+        }
+        .width(26)
+        TableColumn("Server", value: \.name) { row in
+            HStack(spacing: 8) {
+                Circle().fill(row.color).frame(width: 9, height: 9)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(row.name).fontWeight(.medium)
+                    Text(row.address).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .width(min: 120, ideal: 150)
+        TableColumn("Score", value: \.score) { row in
+            Text(Format.ms(row.score)).fontWeight(.semibold).monospacedDigit()
+        }
+        .width(min: 50, ideal: 62, max: 100)
+        TableColumn("Average", value: \.mean) { row in
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Format.ms(row.mean)).monospacedDigit()
+                if row.mean.isFinite, row.margin.isFinite {
+                    Text("± \(Format.ms(row.margin))").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+        }
+        .width(min: 46, ideal: 54, max: 100)
+    }
+
+    @TableColumnBuilder<Row, KeyPathComparator<Row>>
+    private var lookupColumns: some TableColumnContent<Row, KeyPathComparator<Row>> {
+        TableColumn("Median", value: \.median) { Text(Format.ms($0.median)).monospacedDigit() }
+        .width(min: 46, ideal: 54, max: 100)
+        TableColumn("Fastest", value: \.minimum) { Text(Format.ms($0.minimum)).monospacedDigit() }
+        .width(min: 46, ideal: 54, max: 100)
+        TableColumn("95th %", value: \.p95) { Text(Format.ms($0.p95)).monospacedDigit() }
+        .width(min: 46, ideal: 54, max: 100)
+        TableColumn("Slowest", value: \.maximum) { Text(Format.ms($0.maximum)).monospacedDigit() }
+        .width(min: 46, ideal: 54, max: 100)
+        TableColumn("Jitter", value: \.jitter) { Text(Format.ms($0.jitter)).monospacedDigit() }
+        .width(min: 46, ideal: 54, max: 100)
+        TableColumn("Answered", value: \.success) { row in
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Format.percent(row.success)).monospacedDigit()
+                if row.failures > 0 {
+                    Text("\(row.failures) failed").font(.caption).foregroundStyle(.orange)
+                }
+            }
+        }
+        .width(min: 58, ideal: 70)
+    }
+
+    /// From the destination check.
+    @TableColumnBuilder<Row, KeyPathComparator<Row>>
+    private var connectionColumns: some TableColumnContent<Row, KeyPathComparator<Row>> {
+        TableColumn("Lookup + conn.", value: \.lookupAndConnection) { row in
+            Text(Format.ms(row.lookupAndConnection)).fontWeight(.semibold).monospacedDigit()
+        }
+        .width(min: 70, ideal: 92, max: 120)
+        TableColumn("Distance", value: \.distance) { Text(Format.ms($0.distance)).monospacedDigit() }
+        .width(min: 50, ideal: 58, max: 100)
+        TableColumn("Nearest on", value: \.nearestShare) { row in
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.websites > 0 ? "\(row.nearest) of \(row.websites)" : "—").monospacedDigit()
+                if row.extra.isFinite {
+                    Text("+\(Format.ms(row.extra))").font(.caption).monospacedDigit()
+                        .foregroundStyle(row.isFarther ? Color.orange : .secondary)
+                }
+            }
+        }
+        .width(min: 60, ideal: 70)
     }
 }
 
