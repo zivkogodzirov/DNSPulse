@@ -88,8 +88,9 @@ xattr -dr com.apple.quarantine "/Applications/DNS Pulse.app"
 </p>
 
 ### Acting on the results
-- **Use This DNS** switches your Mac to the winner plus a backup from another provider, with one password prompt.
-  **Restore Previous DNS** undoes it.
+- **Use This DNS** switches your Mac to a plain-DNS winner, plus a backup from another provider. Changing DNS needs
+  administrator rights, so macOS asks for your Mac password once to approve it; DNS Pulse never sees the password.
+  **Restore Previous DNS** puts your old setting back the same way.
 - **Encrypted DNS profile:** save a DoT or DoH winner as a `.mobileconfig` profile for your Mac or iPhone, with
   step-by-step install and removal help.
 
