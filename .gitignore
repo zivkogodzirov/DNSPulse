@@ -1,0 +1,10 @@
+# Build output: publish the app as a release download, not in the repository
+/.build/
+/build/
+/.swiftpm/
+
+# Finder folder settings, which can list file names from your Mac
+.DS_Store
+
+# Profiles saved from the app
+*.mobileconfig
